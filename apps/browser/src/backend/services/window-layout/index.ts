@@ -54,6 +54,14 @@ import {
 } from './tab-state-schemas';
 import { classifyTabUrl } from './classify-tab-url';
 import {
+  addToTabOrder,
+  cleanupTabOrders,
+  getAllOrderedTabIds,
+  getTabOrderForAgent,
+  getTabOrderIndex,
+  removeFromTabOrders,
+} from './tab-orders';
+import {
   readPersistedDataSync,
   writePersistedDataSync,
 } from '@/utils/persisted-data';
@@ -139,76 +147,27 @@ export class WindowLayoutService extends DisposableService {
     agentInstanceId: string | null = this.uiKarton.state.browser
       .lastOpenAgentId ?? null,
   ): string[] {
-    const globalIds = contentTabs.globalOrder.filter((id) => {
-      const tab = contentTabs.tabs[id];
-      return tab && tab.agentInstanceId === null;
-    });
-    const agentIds = agentInstanceId
-      ? (contentTabs.agentOrders[agentInstanceId] ?? []).filter((id) => {
-          const tab = contentTabs.tabs[id];
-          return tab && tab.agentInstanceId === agentInstanceId;
-        })
-      : [];
-    return [...globalIds, ...agentIds];
+    return getTabOrderForAgent(contentTabs, agentInstanceId);
   }
 
   private getAllOrderedTabIds(
     contentTabs: AppState['contentTabs'] = this.uiKarton.state.contentTabs,
   ): string[] {
-    const orderedIds: string[] = [];
-    const seen = new Set<string>();
-    const pushIfValid = (id: string) => {
-      if (seen.has(id)) return;
-      if (!contentTabs.tabs[id]) return;
-      seen.add(id);
-      orderedIds.push(id);
-    };
-
-    for (const id of contentTabs.globalOrder) pushIfValid(id);
-    for (const agentId of Object.keys(contentTabs.agentOrders).sort()) {
-      for (const id of contentTabs.agentOrders[agentId] ?? []) {
-        pushIfValid(id);
-      }
-    }
-    for (const id of Object.keys(contentTabs.tabs).sort()) pushIfValid(id);
-    return orderedIds;
+    return getAllOrderedTabIds(contentTabs);
   }
 
   private cleanupTabOrders(
     contentTabs: AppState['contentTabs'],
     removedTabId?: string,
   ): void {
-    const seen = new Set<string>();
-    contentTabs.globalOrder = contentTabs.globalOrder.filter((id) => {
-      if (id === removedTabId || seen.has(id)) return false;
-      const tab = contentTabs.tabs[id];
-      if (!tab || tab.agentInstanceId !== null) return false;
-      seen.add(id);
-      return true;
-    });
-
-    for (const agentId of Object.keys(contentTabs.agentOrders)) {
-      const agentSeen = new Set<string>();
-      contentTabs.agentOrders[agentId] = contentTabs.agentOrders[
-        agentId
-      ]!.filter((id) => {
-        if (id === removedTabId || agentSeen.has(id)) return false;
-        const tab = contentTabs.tabs[id];
-        if (!tab || tab.agentInstanceId !== agentId) return false;
-        agentSeen.add(id);
-        return true;
-      });
-      if (contentTabs.agentOrders[agentId]!.length === 0) {
-        delete contentTabs.agentOrders[agentId];
-      }
-    }
+    cleanupTabOrders(contentTabs, removedTabId);
   }
 
   private removeFromTabOrders(
     contentTabs: AppState['contentTabs'],
     tabId: string,
   ): void {
-    this.cleanupTabOrders(contentTabs, tabId);
+    removeFromTabOrders(contentTabs, tabId);
   }
 
   private addToTabOrder(
@@ -217,17 +176,7 @@ export class WindowLayoutService extends DisposableService {
     agentInstanceId: string | null,
     index?: number,
   ): void {
-    this.removeFromTabOrders(contentTabs, tabId);
-    let order = contentTabs.globalOrder;
-    if (agentInstanceId) {
-      contentTabs.agentOrders[agentInstanceId] ??= [];
-      order = contentTabs.agentOrders[agentInstanceId];
-    }
-    const insertIndex = Math.max(
-      0,
-      Math.min(index ?? order.length, order.length),
-    );
-    order.splice(insertIndex, 0, tabId);
+    addToTabOrder(contentTabs, tabId, agentInstanceId, index);
   }
 
   private getTabOrderIndex(
@@ -235,10 +184,7 @@ export class WindowLayoutService extends DisposableService {
     tabId: string,
     agentInstanceId: string | null,
   ): number {
-    const order = agentInstanceId
-      ? (contentTabs.agentOrders[agentInstanceId] ?? [])
-      : contentTabs.globalOrder;
-    return order.indexOf(tabId);
+    return getTabOrderIndex(contentTabs, tabId, agentInstanceId);
   }
 
   /** Called by TerminalService after inserting a terminal tab into
