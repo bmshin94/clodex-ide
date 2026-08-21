@@ -45,7 +45,14 @@ import {
 import { HOME_PAGE_URL } from '@shared/internal-urls';
 import { MACOS_TRAFFIC_LIGHT_X, MACOS_TRAFFIC_LIGHT_Y } from '@shared/titlebar';
 import { SessionPermissionRegistry } from './tab-permission-handler/session-registry';
-import { z } from 'zod';
+import {
+  type PersistedTabState,
+  type TabEntry,
+  type WindowState,
+  tabStateSchema,
+  windowStateSchema,
+} from './tab-state-schemas';
+import { classifyTabUrl } from './classify-tab-url';
 import {
   readPersistedDataSync,
   writePersistedDataSync,
@@ -62,97 +69,6 @@ import {
   parseGenericKartonConnectionKind,
 } from '../trusted-ui-karton-transport';
 import { registerBeforeSendHeadersMutator } from '../web-request-before-send-headers';
-
-const windowStateSchema = z.object({
-  width: z.number(),
-  height: z.number(),
-  x: z.number().optional(),
-  y: z.number().optional(),
-  isMaximized: z.boolean(),
-  isFullScreen: z.boolean(),
-});
-
-type WindowState = z.infer<typeof windowStateSchema>;
-
-const fileTabMetadataSchema = z.object({
-  workspaceKey: z.string(),
-  relativePath: z.string(),
-  absolutePath: z.string(),
-  kind: z.enum(['text', 'image', 'svg', 'binary']),
-  mimeType: z.string(),
-  size: z.number(),
-  displayName: z.string().optional(),
-  readOnly: z.boolean().optional(),
-  showDiff: z.boolean().optional(),
-  diffStaged: z.boolean().optional(),
-  diffOldPath: z.string().optional(),
-});
-
-const tabEntrySchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('browser'),
-    url: z.string(),
-    agentInstanceId: z.string().nullable(),
-  }),
-  z.object({
-    type: z.literal('terminal'),
-    id: z.string(),
-    cwd: z.string(),
-    title: z.string(),
-    agentInstanceId: z.string().nullable(),
-  }),
-  z.object({
-    type: z.literal('file'),
-    id: z.string(),
-    title: z.string(),
-    file: fileTabMetadataSchema,
-    agentInstanceId: z.string().nullable(),
-  }),
-]);
-
-const tabStateSchema = z.object({
-  /** Ordered list of tabs that were open */
-  tabs: z.array(
-    z.preprocess((val) => {
-      // Normalize legacy entries (no `type` field) to `type: 'browser'`.
-      if (typeof val === 'object' && val !== null && !('type' in val)) {
-        return { type: 'browser', ...(val as Record<string, unknown>) };
-      }
-      return val;
-    }, tabEntrySchema),
-  ),
-  /** Index into `tabs` of the active tab, or -1 if none */
-  activeTabIndex: z.number().int().min(-1),
-  /** Last active tab per agent instance */
-  lastActiveTabPerAgent: z.record(z.string(), z.string()),
-  /** ID of the agent instance that was last open, for restoration on restart */
-  lastOpenAgentId: z.string().nullable(),
-});
-
-type PersistedTabState = z.infer<typeof tabStateSchema>;
-
-/**
- * Anonymous URL classification for telemetry. Returns coarse booleans
- * (`isLocal`, `isHttps`) without exposing the host or path, so events can
- * be segmented (e.g. prod-domain vs local-dev devtools usage) without
- * leaking PII. Malformed URLs and non-http(s) schemes (about:, file:,
- * internal://) all resolve to `{ isLocal: false, isHttps: false }`.
- */
-function classifyTabUrl(url: string): {
-  isLocal: boolean;
-  isHttps: boolean;
-} {
-  if (!url) return { isLocal: false, isHttps: false };
-  try {
-    const parsed = new URL(url);
-    const isLocal =
-      parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
-    const isHttps = parsed.protocol === 'https:';
-    return { isLocal, isHttps };
-  } catch {
-    return { isLocal: false, isHttps: false };
-  }
-}
 
 export class WindowLayoutService extends DisposableService {
   private readonly logger: Logger;
@@ -184,10 +100,7 @@ export class WindowLayoutService extends DisposableService {
   private saveStateTimeout: NodeJS.Timeout | null = null;
   /** Tabs deferred at startup, grouped by agentInstanceId. Populated during
    *  loadTabState(); consumed and cleared lazily by ensureAgentTabsCreated(). */
-  private deferredTabConfigs = new Map<
-    string | null,
-    z.infer<typeof tabEntrySchema>[]
-  >();
+  private deferredTabConfigs = new Map<string | null, TabEntry[]>();
   /** Tracks the last active tab per agent instance for persistence & restore. */
   private lastActiveTabPerAgent: Record<string, string> = {};
   /** Callback wired by ToolboxService — invoked when a terminal tab is
